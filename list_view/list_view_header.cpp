@@ -7,6 +7,44 @@ namespace uih {
 
 using namespace literals::spx;
 
+namespace {
+
+// 自編版新增：深色模式拿掉欄位標題之間的分隔線
+// 分隔線是 Windows 深色主題（DarkMode_ItemsView::Header）畫在欄位邊緣的直線，沒有設定可以關，
+// 所以主題畫完後，從左右邊緣往內檢查幾個像素，跟這一欄中間顏色不同的直線就用中間的顏色蓋掉
+// （滑過、按下的高亮也是取中間的顏色，跟著蓋；欄寬照樣可以拖拉，只是看不到線）
+void hide_header_item_dividers(HDC dc, const RECT& rc)
+{
+    const auto max_divider_width = 3_spx;
+
+    if (rc.right - rc.left <= max_divider_width * 2 || rc.bottom <= rc.top)
+        return;
+
+    const auto middle_y = (rc.top + rc.bottom) / 2;
+    const auto background = GetPixel(dc, (rc.left + rc.right) / 2, middle_y);
+
+    if (background == CLR_INVALID)
+        return;
+
+    const wil::unique_hbrush brush(CreateSolidBrush(background));
+    const auto cover_column = [&](int x) {
+        if (GetPixel(dc, x, middle_y) == background)
+            return false;
+
+        const RECT column_rect{x, rc.top, x + 1, rc.bottom};
+        FillRect(dc, &column_rect, brush.get());
+        return true;
+    };
+
+    for (int offset{}; offset < max_divider_width && cover_column(rc.right - 1 - offset); ++offset) {
+    }
+
+    for (int offset{}; offset < max_divider_width && cover_column(rc.left + offset); ++offset) {
+    }
+}
+
+} // namespace
+
 void ListView::destroy_header()
 {
     if (m_wnd_header) {
@@ -137,6 +175,9 @@ std::optional<LRESULT> ListView::on_wm_notify_header(LPNMHDR lpnm)
         case CDDS_ITEMPOSTPAINT: {
             if (mmh::is_wine())
                 return CDRF_DODEFAULT;
+
+            if (m_use_dark_mode)
+                hide_header_item_dividers(lpcd->hdc, lpcd->rc);
 
             auto cr{GetTextColor(lpcd->hdc)};
 
