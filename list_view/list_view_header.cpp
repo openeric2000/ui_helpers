@@ -43,6 +43,10 @@ void hide_header_item_dividers(HDC dc, const RECT& rc)
     }
 }
 
+// 滑鼠移開標題列後，主題的滑過動畫最後一格不一定會再經過自訂繪製，分隔線會殘留，所以動畫結束後再整個重畫一次
+constexpr UINT_PTR header_leave_repaint_timer_id = 0x4e48;
+constexpr UINT header_leave_repaint_delay_ms = 500;
+
 } // namespace
 
 void ListView::destroy_header()
@@ -50,6 +54,7 @@ void ListView::destroy_header()
     if (m_wnd_header) {
         DestroyWindow(m_wnd_header);
         m_wnd_header = nullptr;
+        m_header_hot = false;
         m_header_font.reset();
     }
 }
@@ -68,6 +73,35 @@ void ListView::create_header()
 
             set_header_window_theme();
             SetWindowFont(m_wnd_header, m_header_font.get(), FALSE);
+
+            // 自編版新增：追蹤滑鼠在不在標題列上。在上面時不蓋分隔線，才看得出哪裡可以拖拉欄寬、點擊排序；
+            // 移開後蓋回去，標題列就乾乾淨淨
+            subclass_window(m_wnd_header,
+                [this](auto wnd_proc, auto wnd, auto msg, auto wp, auto lp) -> std::optional<LRESULT> {
+                    switch (msg) {
+                    case WM_MOUSEMOVE:
+                        if (!m_header_hot) {
+                            m_header_hot = true;
+                            TRACKMOUSEEVENT track_mouse_event{sizeof(TRACKMOUSEEVENT), TME_LEAVE, wnd, 0};
+                            TrackMouseEvent(&track_mouse_event);
+                            InvalidateRect(wnd, nullptr, TRUE);
+                        }
+                        break;
+                    case WM_MOUSELEAVE:
+                        m_header_hot = false;
+                        InvalidateRect(wnd, nullptr, TRUE);
+                        SetTimer(wnd, header_leave_repaint_timer_id, header_leave_repaint_delay_ms, nullptr);
+                        break;
+                    case WM_TIMER:
+                        if (wp == header_leave_repaint_timer_id) {
+                            KillTimer(wnd, header_leave_repaint_timer_id);
+                            InvalidateRect(wnd, nullptr, TRUE);
+                            return 0;
+                        }
+                        break;
+                    }
+                    return {};
+                });
 
             if (m_initialised) {
                 build_header();
@@ -176,7 +210,7 @@ std::optional<LRESULT> ListView::on_wm_notify_header(LPNMHDR lpnm)
             if (mmh::is_wine())
                 return CDRF_DODEFAULT;
 
-            if (m_use_dark_mode)
+            if (m_use_dark_mode && !m_header_hot)
                 hide_header_item_dividers(lpcd->hdc, lpcd->rc);
 
             auto cr{GetTextColor(lpcd->hdc)};
