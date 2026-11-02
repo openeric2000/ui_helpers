@@ -1057,8 +1057,8 @@ private:
     wil::unique_htheme m_tooltip_theme;
 
     HWND m_wnd_header{};
-    // 自編版新增：滑鼠在標題列上時為 true；深色模式只有這時才顯示欄位之間的分隔線（見 list_view_header.cpp）
-    bool m_header_hot{};
+    // 自編版新增：滑鼠停在標題列的第幾個項目（不在項目上為 -1）；深色模式只顯示這一欄左右兩條分隔線（見 list_view_header.cpp）
+    int m_header_hot_item{-1};
 
     HWND m_wnd_inline_edit{};
     WNDPROC m_proc_inline_edit{};

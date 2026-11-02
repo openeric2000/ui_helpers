@@ -13,9 +13,13 @@ namespace {
 // 分隔線是 Windows 深色主題（DarkMode_ItemsView::Header）畫在欄位邊緣的直線，沒有設定可以關，
 // 所以主題畫完後，從左右邊緣往內檢查幾個像素，跟這一欄中間顏色不同的直線就用中間的顏色蓋掉
 // （滑過、按下的高亮也是取中間的顏色，跟著蓋；欄寬照樣可以拖拉，只是看不到線）
-void hide_header_item_dividers(HDC dc, const RECT& rc)
+// cover_left／cover_right：這一欄的左邊緣、右邊緣要不要蓋；滑鼠停在某一欄時，那一欄的左右兩條線不蓋
+void hide_header_item_dividers(HDC dc, const RECT& rc, bool cover_left, bool cover_right)
 {
     const auto max_divider_width = 3_spx;
+
+    if (!cover_left && !cover_right)
+        return;
 
     if (rc.right - rc.left <= max_divider_width * 2 || rc.bottom <= rc.top)
         return;
@@ -36,11 +40,24 @@ void hide_header_item_dividers(HDC dc, const RECT& rc)
         return true;
     };
 
-    for (int offset{}; offset < max_divider_width && cover_column(rc.right - 1 - offset); ++offset) {
+    if (cover_right) {
+        for (int offset{}; offset < max_divider_width && cover_column(rc.right - 1 - offset); ++offset) {
+        }
     }
 
-    for (int offset{}; offset < max_divider_width && cover_column(rc.left + offset); ++offset) {
+    if (cover_left) {
+        for (int offset{}; offset < max_divider_width && cover_column(rc.left + offset); ++offset) {
+        }
     }
+}
+
+// 滑鼠座標（標題列的使用者區座標）底下是第幾個標題項目；不在項目或分隔線上傳回 -1
+int get_header_item_at(HWND wnd, LPARAM lp)
+{
+    HDHITTESTINFO info{};
+    info.pt = {static_cast<short>(LOWORD(lp)), static_cast<short>(HIWORD(lp))};
+    SendMessage(wnd, HDM_HITTEST, 0, reinterpret_cast<LPARAM>(&info));
+    return (info.flags & (HHT_ONHEADER | HHT_ONDIVIDER | HHT_ONDIVOPEN)) ? info.iItem : -1;
 }
 
 // 滑鼠移開標題列後，主題的滑過動畫最後一格不一定會再經過自訂繪製，分隔線會殘留，所以動畫結束後再整個重畫一次
@@ -54,7 +71,7 @@ void ListView::destroy_header()
     if (m_wnd_header) {
         DestroyWindow(m_wnd_header);
         m_wnd_header = nullptr;
-        m_header_hot = false;
+        m_header_hot_item = -1;
         m_header_font.reset();
     }
 }
@@ -74,21 +91,28 @@ void ListView::create_header()
             set_header_window_theme();
             SetWindowFont(m_wnd_header, m_header_font.get(), FALSE);
 
-            // 自編版新增：追蹤滑鼠在不在標題列上。在上面時不蓋分隔線，才看得出哪裡可以拖拉欄寬、點擊排序；
-            // 移開後蓋回去，標題列就乾乾淨淨
+            // 自編版新增：追蹤滑鼠停在第幾欄。那一欄的左右兩條分隔線不蓋，才看得出哪裡可以拖拉欄寬、點擊排序；
+            // 其他欄與滑鼠移開後都蓋回去，標題列就乾乾淨淨
             subclass_window(m_wnd_header,
                 [this](auto wnd_proc, auto wnd, auto msg, auto wp, auto lp) -> std::optional<LRESULT> {
                     switch (msg) {
-                    case WM_MOUSEMOVE:
-                        if (!m_header_hot) {
-                            m_header_hot = true;
-                            TRACKMOUSEEVENT track_mouse_event{sizeof(TRACKMOUSEEVENT), TME_LEAVE, wnd, 0};
-                            TrackMouseEvent(&track_mouse_event);
+                    case WM_MOUSEMOVE: {
+                        TRACKMOUSEEVENT track_mouse_event{sizeof(TRACKMOUSEEVENT), TME_LEAVE, wnd, 0};
+                        TrackMouseEvent(&track_mouse_event);
+
+                        // 按著左鍵拖拉欄寬時維持原本的顯示（游標可能已經離開標題列，不能重新判斷）
+                        if (wp & MK_LBUTTON)
+                            break;
+
+                        const auto item = get_header_item_at(wnd, lp);
+                        if (item != m_header_hot_item) {
+                            m_header_hot_item = item;
                             InvalidateRect(wnd, nullptr, TRUE);
                         }
                         break;
+                    }
                     case WM_MOUSELEAVE:
-                        m_header_hot = false;
+                        m_header_hot_item = -1;
                         InvalidateRect(wnd, nullptr, TRUE);
                         SetTimer(wnd, header_leave_repaint_timer_id, header_leave_repaint_delay_ms, nullptr);
                         break;
@@ -210,8 +234,14 @@ std::optional<LRESULT> ListView::on_wm_notify_header(LPNMHDR lpnm)
             if (mmh::is_wine())
                 return CDRF_DODEFAULT;
 
-            if (m_use_dark_mode && !m_header_hot)
-                hide_header_item_dividers(lpcd->hdc, lpcd->rc);
+            if (m_use_dark_mode) {
+                // 滑鼠停在第 hot 欄：那一欄的左右邊緣不蓋；左邊那欄的右邊緣、右邊那欄的左邊緣就是它的兩條分隔線，也不蓋
+                const auto item = static_cast<int>(lpcd->dwItemSpec);
+                const auto hot = m_header_hot_item;
+                const auto show_left = hot >= 0 && (item == hot || item == hot + 1);
+                const auto show_right = hot >= 0 && (item == hot || item == hot - 1);
+                hide_header_item_dividers(lpcd->hdc, lpcd->rc, !show_left, !show_right);
+            }
 
             auto cr{GetTextColor(lpcd->hdc)};
 
