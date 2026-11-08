@@ -29,13 +29,13 @@ void update_overlay_window(HWND overlay_wnd, POINT screen_pt, const SizedHbitmap
 
 } // namespace
 
-void AutoscrollHelper::start(HWND wnd, bool set_focus)
+void AutoscrollHelper::start(HWND wnd, bool set_focus, std::optional<bool> can_scroll_vertically)
 {
     if (m_active)
         return;
 
     m_can_scroll_horizontally = is_scrollable(wnd, ScrollAxis::Horizontal);
-    m_can_scroll_vertically = is_scrollable(wnd, ScrollAxis::Vertical);
+    m_can_scroll_vertically = can_scroll_vertically.value_or(is_scrollable(wnd, ScrollAxis::Vertical));
 
     if (!m_can_scroll_horizontally && !m_can_scroll_vertically)
         return;

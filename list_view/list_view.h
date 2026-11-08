@@ -371,6 +371,15 @@ public:
 
     void update_scroll_info(bool b_vertical = true, bool b_horizontal = true, bool redraw = true,
         std::optional<int> new_vertical_position = std::nullopt);
+
+    // 自編版新增（2026-11-08）：覆蓋在右邊緣的細滑軌（預覽樣式 2：平常 4 px、滑鼠靠近變 10 px、不占版面）。
+    // 只有呼叫過 set_thin_scrollbar_allowed(true) 的清單才會用（設定頁裡的小清單維持原生滑軌）；
+    // 全域開關由 Columns UI 設定頁呼叫 s_set_thin_scrollbar_enabled，所有允許的清單當場切換（不用重開）。
+    // 開啟時垂直捲動的範圍與頁高由這個類別自己存（不呼叫 SetScrollInfo、視窗沒有 WS_VSCROLL），水平滑軌仍用原生
+    void set_thin_scrollbar_allowed(bool allowed);
+    static void s_set_thin_scrollbar_enabled(bool enabled);
+    [[nodiscard]] static bool s_is_thin_scrollbar_enabled() { return s_thin_scrollbar_enabled; }
+
     ItemVisibility get_item_visibility(size_t index, bool use_target_position = true) const;
     bool is_partially_visible(size_t index);
     bool is_fully_visible(size_t index);
@@ -1100,6 +1109,42 @@ private:
     int m_scroll_position{};
     int m_horizontal_scroll_position{};
     bool m_scroll_bar_update_in_progress{};
+
+    // ---- 細滑軌（2026-11-08，實作在 list_view_scroll.cpp 下半部）----
+    struct ThinScrollbarGeometry {
+        RECT strip{};
+        RECT thumb{};
+        int track_top{};
+        int track_height{};
+        int thumb_height{};
+        int position_range{};
+    };
+
+    inline static std::vector<ListView*> s_list_views;
+    inline static bool s_thin_scrollbar_enabled{};
+
+    bool m_thin_scrollbar_allowed{};
+    bool m_thin_scrollbar_active{};
+    // 細滑軌開啟時自己存的垂直捲動範圍（跟 Win32 的 nMax、nPage 同義：最大位置＝max − page + 1）
+    int m_vscroll_max{};
+    int m_vscroll_page{};
+    bool m_thin_near{};
+    bool m_thin_thumb_hot{};
+    bool m_thin_dragging{};
+    int m_thin_drag_grab{};
+    bool m_thin_tracking_leave{};
+
+    void apply_thin_scrollbar_state();
+    [[nodiscard]] bool is_vertical_scrollable() const;
+    [[nodiscard]] SCROLLINFO get_scroll_info(ScrollAxis axis) const;
+    [[nodiscard]] int clamp_scroll(ScrollAxis axis, int position) const;
+    [[nodiscard]] std::optional<ThinScrollbarGeometry> get_thin_scrollbar_geometry() const;
+    void paint_thin_scrollbar(HDC dc, const RECT& paint_rect);
+    void invalidate_thin_scrollbar() const;
+    void update_thin_scrollbar_hover(POINT pt);
+    void drag_thin_scrollbar_to(int mouse_y);
+    void end_thin_scrollbar_drag(bool release_capture);
+    std::optional<LRESULT> on_thin_scrollbar_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp);
     bool m_use_smooth_scroll{};
     bool m_is_smooth_scrolling_suspended{};
     std::optional<SmoothScrollHelper> m_smooth_scroll_helper;

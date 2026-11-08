@@ -32,7 +32,9 @@ public:
     {
     }
 
-    void start(HWND wnd, bool set_focus = false);
+    // 自編版新增（2026-11-08）：細滑軌模式下視窗沒有原生垂直滑軌，用原生資訊判斷會誤判成不能捲，
+    // 所以呼叫端可以直接告知垂直方向能不能捲（沒給就照原本用原生資訊判斷）
+    void start(HWND wnd, bool set_focus = false, std::optional<bool> can_scroll_vertically = std::nullopt);
 
     std::optional<LRESULT> handle_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp);
 

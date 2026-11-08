@@ -22,6 +22,12 @@ LRESULT ListView::on_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
     if (const auto result = m_autoscroll_helper ? m_autoscroll_helper->handle_message(wnd, msg, wp, lp) : std::nullopt)
         return *result;
 
+    // 細滑軌（自編版新增）：右邊緣那條的滑鼠操作先在這裡處理，沒處理的才走原本流程
+    if (m_thin_scrollbar_active) {
+        if (const auto result = on_thin_scrollbar_message(wnd, msg, wp, lp))
+            return *result;
+    }
+
     switch (msg) {
     case WM_CREATE: {
         *m_is_destroyed = false;
@@ -31,7 +37,7 @@ LRESULT ListView::on_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             [this](ScrollAxis axis) {
                 return axis == ScrollAxis::Vertical ? m_scroll_position : m_horizontal_scroll_position;
             },
-            [this](ScrollAxis axis, int position) { return clamp_scroll_position(get_wnd(), axis, position); },
+            [this](ScrollAxis axis, int position) { return clamp_scroll(axis, position); },
             [this](ScrollAxis axis, int new_position) { internal_scroll(new_position, axis); });
 
         m_search_bar.set_kill_focus_callback([&](HWND new_focus_wnd) { on_kill_focus(new_focus_wnd); });
@@ -84,6 +90,10 @@ LRESULT ListView::on_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         if (m_show_header)
             create_header();
 
+        // 細滑軌：登記進全域名單（設定頁切換時一起更新），並依目前開關決定這個視窗用哪種滑軌
+        s_list_views.push_back(this);
+        apply_thin_scrollbar_state();
+
         m_initialised = true;
 
         const auto has_initial_items = !m_items.empty();
@@ -103,6 +113,7 @@ LRESULT ListView::on_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     }
     case WM_DESTROY:
+        std::erase(s_list_views, this);
         m_initialised = false;
         *m_is_destroyed = true;
         m_inline_edit_save = false;
@@ -173,6 +184,10 @@ LRESULT ListView::on_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         const auto dc = wil::BeginPaint(wnd, &ps);
         BufferedPaint buffered_dc(dc.get(), ps.rcPaint);
         render_items(buffered_dc.get(), ps.rcPaint);
+
+        if (m_thin_scrollbar_active)
+            paint_thin_scrollbar(buffered_dc.get(), ps.rcPaint);
+
         return 0;
     }
     case WM_UPDATEUISTATE:
@@ -525,7 +540,8 @@ LRESULT ListView::on_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         [[fallthrough]];
     case WM_MBUTTONDBLCLK:
         if (m_autoscroll_helper && (!m_allow_autoscroll_callback || m_allow_autoscroll_callback()))
-            m_autoscroll_helper->start(wnd);
+            m_autoscroll_helper->start(
+                wnd, false, m_thin_scrollbar_active ? std::optional<bool>{is_vertical_scrollable()} : std::nullopt);
 
         return 0;
     case WM_MBUTTONUP: {
@@ -541,7 +557,8 @@ LRESULT ListView::on_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_MOUSEHWHEEL:
     case WM_MOUSEWHEEL: {
         const auto style = GetWindowLongPtr(get_wnd(), GWL_STYLE);
-        const auto has_vertical_scroll_bar = (style & WS_VSCROLL) != 0;
+        // 細滑軌模式沒有 WS_VSCROLL，改看範圍是否比頁高大
+        const auto has_vertical_scroll_bar = is_vertical_scrollable();
         const auto has_horizontal_scroll_bar = (style & WS_HSCROLL) != 0;
         const auto is_ctrl_down = (wp & MK_CONTROL) != 0;
 
@@ -553,10 +570,7 @@ LRESULT ListView::on_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
 
         const auto is_horizontal = msg == WM_MOUSEHWHEEL || !has_vertical_scroll_bar || is_ctrl_down;
 
-        SCROLLINFO si{};
-        si.cbSize = sizeof(SCROLLINFO);
-        si.fMask = SIF_PAGE;
-        GetScrollInfo(get_wnd(), is_horizontal ? SB_HORZ : SB_VERT, &si);
+        const auto si = get_scroll_info(is_horizontal ? ScrollAxis::Horizontal : ScrollAxis::Vertical);
 
         UINT system_scroll_lines{3};
         SystemParametersInfo(SPI_GETWHEELSCROLLLINES, 0, &system_scroll_lines, 0);

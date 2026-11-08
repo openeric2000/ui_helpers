@@ -357,11 +357,7 @@ void ListView::process_navigation_keydown(WPARAM wp, bool alt_down, bool repeat)
     else if (focus >= total)
         focus = total - 1;
 
-    SCROLLINFO si{};
-    si.cbSize = sizeof(si);
-
-    si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
-    GetScrollInfo(get_wnd(), SB_VERT, &si);
+    const auto si = get_scroll_info(ScrollAxis::Vertical);
 
     const auto focused_item_is_visible = is_partially_visible(focus);
 
