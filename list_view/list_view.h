@@ -1133,6 +1133,8 @@ private:
     bool m_thin_dragging{};
     int m_thin_drag_grab{};
     bool m_thin_tracking_leave{};
+    // 按住軌道空白處時連續翻頁（原生滑軌的行為）：按下去先翻一頁，過一小段延遲後每隔一下再翻一頁，直到滑塊追到游標底下或放開
+    bool m_thin_track_holding{};
 
     // 浮層（獨立的透明子視窗，滑軌畫在上面；說明見 list_view_scroll.cpp）
     struct ThinOverlayState {
@@ -1156,6 +1158,8 @@ private:
     LRESULT on_thin_overlay_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp);
     void update_thin_overlay();
     void destroy_thin_overlay();
+    void repeat_thin_track_page();
+    void end_thin_track_hold();
 
     void apply_thin_scrollbar_state();
     [[nodiscard]] bool is_vertical_scrollable() const;

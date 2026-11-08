@@ -451,6 +451,11 @@ constexpr BYTE thin_alpha_rest = 61;
 constexpr BYTE thin_alpha_near = 107;
 constexpr BYTE thin_alpha_hot = 158;
 
+// 按住軌道空白處連續翻頁：第一次延遲 400 ms，之後每 50 ms 翻一頁（跟原生滑軌的手感接近）
+constexpr UINT_PTR thin_repeat_timer_id = 1;
+constexpr UINT thin_repeat_first_delay_ms = 400;
+constexpr UINT thin_repeat_interval_ms = 50;
+
 constexpr wchar_t thin_overlay_class_name[] = L"NocturneThinScrollbarOverlay";
 
 HINSTANCE get_this_module()
@@ -662,7 +667,7 @@ std::optional<ListView::ThinScrollbarGeometry> ListView::get_thin_scrollbar_geom
         = std::clamp(proportional_height, std::min(scale_dpi_value(thin_thumb_min_height), track_height), track_height);
 
     // 拖曳中滑塊跟著目標位置（平滑捲動還在追的時候，畫在實際位置會慢半拍）
-    const auto position = std::clamp(m_thin_dragging && m_smooth_scroll_helper
+    const auto position = std::clamp((m_thin_dragging || m_thin_track_holding) && m_smooth_scroll_helper
             ? m_smooth_scroll_helper->current_target(ScrollAxis::Vertical)
             : m_scroll_position,
         0, geometry.position_range);
@@ -688,6 +693,7 @@ void ListView::destroy_thin_overlay()
 
     m_thin_overlay_shown = false;
     m_thin_tracking_leave = false;
+    m_thin_track_holding = false;
 }
 
 // 依目前的捲動範圍、位置與滑鼠狀態更新浮層：沒有可捲的內容就藏起來；內容沒變就什麼都不做
@@ -834,6 +840,46 @@ void ListView::drag_thin_scrollbar_to(int mouse_y)
     update_thin_overlay();
 }
 
+// 計時器每次響：游標還在軌道上、而且在滑塊上方或下方，就再翻一頁；滑塊追到游標底下就先不翻（游標移開滑塊又會繼續）
+void ListView::repeat_thin_track_page()
+{
+    const auto geometry = get_thin_scrollbar_geometry();
+
+    if (!geometry || !get_wnd())
+        return;
+
+    POINT pt{};
+    GetCursorPos(&pt);
+    ScreenToClient(get_wnd(), &pt);
+
+    if (!PtInRect(&geometry->strip, pt))
+        return;
+
+    if (pt.y < geometry->thumb.top)
+        scroll_from_scroll_bar(SB_PAGEUP);
+    else if (pt.y >= geometry->thumb.bottom)
+        scroll_from_scroll_bar(SB_PAGEDOWN);
+
+    update_thin_overlay();
+}
+
+void ListView::end_thin_track_hold()
+{
+    if (!m_thin_track_holding)
+        return;
+
+    m_thin_track_holding = false;
+
+    if (m_thin_overlay) {
+        KillTimer(m_thin_overlay, thin_repeat_timer_id);
+
+        if (GetCapture() == m_thin_overlay)
+            ReleaseCapture();
+    }
+
+    update_thin_overlay();
+}
+
 void ListView::end_thin_scrollbar_drag(bool release_capture)
 {
     if (!m_thin_dragging)
@@ -915,18 +961,32 @@ LRESULT ListView::on_thin_overlay_message(HWND wnd, UINT msg, WPARAM wp, LPARAM 
             m_thin_drag_grab = pt.y - geometry->thumb.top;
             SetCapture(wnd);
         } else {
+            // 軌道空白處：先翻一頁，按住不放就連續翻（見 repeat_thin_track_page）
             scroll_from_scroll_bar(pt.y < geometry->thumb.top ? SB_PAGEUP : SB_PAGEDOWN);
+            m_thin_track_holding = true;
+            SetCapture(wnd);
+            SetTimer(wnd, thin_repeat_timer_id, thin_repeat_first_delay_ms, nullptr);
         }
 
         update_thin_overlay();
         return 0;
     }
+    case WM_TIMER:
+        if (wp == thin_repeat_timer_id && m_thin_track_holding) {
+            SetTimer(wnd, thin_repeat_timer_id, thin_repeat_interval_ms, nullptr);
+            repeat_thin_track_page();
+            return 0;
+        }
+
+        return DefWindowProc(wnd, msg, wp, lp);
     case WM_LBUTTONUP:
         end_thin_scrollbar_drag(true);
+        end_thin_track_hold();
         return 0;
     case WM_CAPTURECHANGED:
     case WM_CANCELMODE:
         end_thin_scrollbar_drag(false);
+        end_thin_track_hold();
         return 0;
     default:
         return DefWindowProc(wnd, msg, wp, lp);
