@@ -219,7 +219,7 @@ void ListView::internal_scroll(int new_position, ScrollAxis axis)
 
     // 細滑軌是畫在清單上的：ScrollWindowEx 會把舊的滑軌像素一起捲走，要整條重畫
     if (axis == ScrollAxis::Vertical && m_thin_scrollbar_active)
-        invalidate_thin_scrollbar();
+        update_thin_overlay();
 
     if (!skip_update_now)
         RedrawWindow(get_wnd(), nullptr, nullptr, RDW_UPDATENOW | RDW_ALLCHILDREN);
@@ -297,7 +297,7 @@ void ListView::update_vertical_scroll_info(bool redraw, std::optional<int> new_v
         m_vscroll_max = scroll.nMax;
         m_vscroll_page = get_items_viewport_height();
         m_scroll_position = clamp_scroll(ScrollAxis::Vertical, new_vertical_position.value_or(m_scroll_position));
-        invalidate_thin_scrollbar();
+        update_thin_overlay();
 
         if (new_vertical_position || m_scroll_position != old_scroll_position)
             invalidate_all();
@@ -343,7 +343,7 @@ void ListView::update_horizontal_scroll_info(bool redraw)
         // 水平滑軌出現或消失會改變可視高度，垂直的頁高要跟著變
         m_vscroll_page = get_items_viewport_height();
         m_scroll_position = clamp_scroll(ScrollAxis::Vertical, m_scroll_position);
-        invalidate_thin_scrollbar();
+        update_thin_overlay();
     } else if (b_old_show != b_show) {
         rc = get_items_rect();
 
@@ -427,9 +427,14 @@ void ListView::configure_autoscroll(AutoscrollCursorInfo cursor_info)
 
 // ======================================================================================================
 // 細滑軌（自編版新增，2026-11-08）
-// 預覽樣式 2：右邊緣一條很細的滑軌（平常 4 px、滑鼠靠近右邊緣 16 px 內變 10 px），畫在清單上、不占版面，
+// 預覽樣式 2：右邊緣一條很細的滑軌（平常 4 px、滑鼠靠近右邊緣 16 px 內變 10 px），不占版面，
 // 顏色用清單文字色加透明度（所以深色、淺色都是中性灰）。垂直範圍／頁高／位置由這個類別自己存，視窗沒有 WS_VSCROLL，
-// 滾輪、鍵盤、平滑捲動都沿用原本的流程（只是「讀原生滑軌資訊」的幾個地方改走 get_scroll_info／clamp_scroll）
+// 滾輪、鍵盤、平滑捲動都沿用原本的流程（只是「讀原生滑軌資訊」的幾個地方改走 get_scroll_info／clamp_scroll）。
+//
+// 滑軌本身畫在一個獨立的透明浮層子視窗（WS_EX_LAYERED、逐像素 alpha，由 DWM 合成），不畫在清單自己的畫面上：
+// 第一版畫在清單上，清單捲動（ScrollWindowEx）會把舊的滑軌像素一起捲走、重繪又晚一步，快速拖曳時看得到鬼影與閃動（使用者回報）；
+// 浮層不屬於清單的畫面，清單怎麼捲、怎麼重繪都碰不到它。整條軌道（16 DIP 寬）都是 alpha＝1 的「看不見但吃得到滑鼠」的像素，
+// 所以滑鼠靠近、按下、拖曳都由浮層自己接，再呼叫清單的捲動函式。靠近時不再鋪軌道底色（使用者覺得灰底不好看）。
 // ======================================================================================================
 
 namespace {
@@ -441,14 +446,52 @@ constexpr int thin_thumb_rest_width = 4;
 constexpr int thin_thumb_near_width = 10;
 constexpr int thin_thumb_min_height = 36;
 
-// 不透明度（0～255）：平常 .24、靠近 .42、滑到滑塊上或拖曳中 .62；靠近時整條軌道淡淡鋪一層 .055
+// 不透明度（0～255）：平常 .24、靠近 .42、滑到滑塊上或拖曳中 .62
 constexpr BYTE thin_alpha_rest = 61;
 constexpr BYTE thin_alpha_near = 107;
 constexpr BYTE thin_alpha_hot = 158;
-constexpr BYTE thin_alpha_track = 14;
 
-// 把一個顏色以指定不透明度疊到 dc 的 rc 範圍上；pill 為真時畫成兩端全圓的膠囊（邊緣用涵蓋率做抗鋸齒）
-void blend_colour(HDC dc, const RECT& rc, COLORREF colour, BYTE alpha, bool pill)
+constexpr wchar_t thin_overlay_class_name[] = L"NocturneThinScrollbarOverlay";
+
+HINSTANCE get_this_module()
+{
+    HMODULE module{};
+    GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        reinterpret_cast<LPCWSTR>(&get_this_module), &module);
+    return module;
+}
+
+// 視窗類別只登記一次，模組卸載時（靜態物件解構）才取消登記
+class ThinOverlayWindowClass {
+public:
+    explicit ThinOverlayWindowClass(WNDPROC proc)
+    {
+        WNDCLASSEX window_class{};
+        window_class.cbSize = sizeof(window_class);
+        window_class.lpfnWndProc = proc;
+        window_class.hInstance = get_this_module();
+        window_class.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        window_class.lpszClassName = thin_overlay_class_name;
+        m_atom = RegisterClassEx(&window_class);
+    }
+
+    ~ThinOverlayWindowClass()
+    {
+        if (m_atom)
+            UnregisterClass(MAKEINTATOM(m_atom), get_this_module());
+    }
+
+    ThinOverlayWindowClass(const ThinOverlayWindowClass&) = delete;
+    ThinOverlayWindowClass& operator=(const ThinOverlayWindowClass&) = delete;
+
+    [[nodiscard]] bool is_registered() const { return m_atom != 0; }
+
+private:
+    ATOM m_atom{};
+};
+
+// 在預乘 ARGB 的緩衝區裡畫一個兩端全圓的膠囊（邊緣用涵蓋率做抗鋸齒）；涵蓋率為 0 的像素保留原值（alpha＝1 的吃滑鼠像素）
+void draw_pill(uint32_t* pixels, int buffer_width, const RECT& rc, COLORREF colour, BYTE alpha)
 {
     const auto width = rc.right - rc.left;
     const auto height = rc.bottom - rc.top;
@@ -456,74 +499,49 @@ void blend_colour(HDC dc, const RECT& rc, COLORREF colour, BYTE alpha, bool pill
     if (width <= 0 || height <= 0 || alpha == 0)
         return;
 
-    // 方形：1×1 的來源拉伸到整個範圍；膠囊：每個像素各算一次涵蓋率
-    const auto source_width = pill ? width : 1;
-    const auto source_height = pill ? height : 1;
-
-    BITMAPINFO info{};
-    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    info.bmiHeader.biWidth = source_width;
-    info.bmiHeader.biHeight = -source_height;
-    info.bmiHeader.biPlanes = 1;
-    info.bmiHeader.biBitCount = 32;
-    info.bmiHeader.biCompression = BI_RGB;
-
-    void* bits{};
-    wil::unique_hbitmap bitmap{CreateDIBSection(nullptr, &info, DIB_RGB_COLORS, &bits, nullptr, 0)};
-
-    if (!bitmap || !bits)
-        return;
-
     const auto red = GetRValue(colour);
     const auto green = GetGValue(colour);
     const auto blue = GetBValue(colour);
 
-    const auto write_pixel = [&](uint32_t* pixel, float coverage) {
-        // AlphaBlend 要的是預乘的 ARGB
-        const auto a = static_cast<uint32_t>(std::lround(alpha * std::clamp(coverage, 0.f, 1.f)));
-        *pixel = (a << 24) | (((red * a + 127) / 255) << 16) | (((green * a + 127) / 255) << 8) | ((blue * a + 127) / 255);
-    };
+    const auto half_width = static_cast<float>(width) * .5f;
+    const auto half_height = static_cast<float>(height) * .5f;
+    const auto radius = std::min(half_width, half_height);
 
-    auto* pixels = static_cast<uint32_t*>(bits);
+    for (int y = 0; y < height; ++y) {
+        const auto py = std::abs(static_cast<float>(y) + .5f - half_height) - (half_height - radius);
 
-    if (!pill) {
-        write_pixel(pixels, 1.f);
-    } else {
-        const auto half_width = static_cast<float>(width) * .5f;
-        const auto half_height = static_cast<float>(height) * .5f;
-        const auto radius = std::min(half_width, half_height);
+        for (int x = 0; x < width; ++x) {
+            const auto px = std::abs(static_cast<float>(x) + .5f - half_width) - (half_width - radius);
+            // 圓角矩形的有號距離：邊界內為負；離邊界半個像素以內做線性過渡
+            const auto distance
+                = std::hypot(std::max(px, 0.f), std::max(py, 0.f)) + std::min(std::max(px, py), 0.f) - radius;
+            const auto coverage = std::clamp(.5f - distance, 0.f, 1.f);
+            const auto a = static_cast<uint32_t>(std::lround(alpha * coverage));
 
-        for (int y = 0; y < height; ++y) {
-            const auto py = std::abs(static_cast<float>(y) + .5f - half_height) - (half_height - radius);
+            if (a == 0)
+                continue;
 
-            for (int x = 0; x < width; ++x) {
-                const auto px = std::abs(static_cast<float>(x) + .5f - half_width) - (half_width - radius);
-                // 圓角矩形的有號距離：邊界內為負；離邊界半個像素以內做線性過渡
-                const auto distance
-                    = std::hypot(std::max(px, 0.f), std::max(py, 0.f)) + std::min(std::max(px, py), 0.f) - radius;
-                write_pixel(pixels + static_cast<size_t>(y) * width + x, .5f - distance);
-            }
+            // UpdateLayeredWindow 要的是預乘的 ARGB
+            pixels[static_cast<size_t>(rc.top + y) * buffer_width + rc.left + x]
+                = (a << 24) | (((red * a + 127) / 255) << 16) | (((green * a + 127) / 255) << 8) | ((blue * a + 127) / 255);
         }
     }
-
-    wil::unique_hdc memory_dc{CreateCompatibleDC(dc)};
-
-    if (!memory_dc)
-        return;
-
-    const auto _ = wil::SelectObject(memory_dc.get(), bitmap.get());
-
-    BLENDFUNCTION blend{};
-    blend.BlendOp = AC_SRC_OVER;
-    blend.SourceConstantAlpha = 255;
-    blend.AlphaFormat = AC_SRC_ALPHA;
-
-    AlphaBlend(dc, rc.left, rc.top, width, height, memory_dc.get(), 0, 0, source_width, source_height, blend);
 }
 
 } // namespace
 
-#pragma comment(lib, "msimg32.lib")
+LRESULT CALLBACK ListView::s_thin_overlay_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    if (msg == WM_MOUSEACTIVATE)
+        return MA_NOACTIVATE;
+
+    const auto list_view = reinterpret_cast<ListView*>(GetWindowLongPtr(wnd, GWLP_USERDATA));
+
+    if (list_view)
+        return list_view->on_thin_overlay_message(wnd, msg, wp, lp);
+
+    return DefWindowProc(wnd, msg, wp, lp);
+}
 
 void ListView::set_thin_scrollbar_allowed(bool allowed)
 {
@@ -558,6 +576,10 @@ void ListView::apply_thin_scrollbar_state()
     m_thin_scrollbar_active = wanted;
     m_thin_near = false;
     m_thin_thumb_hot = false;
+
+    // 關掉就把浮層拿掉（再開時會重建）
+    if (!wanted)
+        destroy_thin_overlay();
 
     // 視窗還在建立中（WM_CREATE 還沒走完）：只記下模式，結尾的 update_scroll_info 會用新模式算
     if (!m_initialised)
@@ -657,67 +679,138 @@ std::optional<ListView::ThinScrollbarGeometry> ListView::get_thin_scrollbar_geom
     return geometry;
 }
 
-void ListView::paint_thin_scrollbar(HDC dc, const RECT& paint_rect)
+void ListView::destroy_thin_overlay()
 {
-    const auto geometry = get_thin_scrollbar_geometry();
+    if (m_thin_overlay) {
+        DestroyWindow(m_thin_overlay);
+        m_thin_overlay = nullptr;
+    }
 
-    if (!geometry)
-        return;
-
-    RECT intersection{};
-
-    if (!IntersectRect(&intersection, &geometry->strip, &paint_rect))
-        return;
-
-    const auto colours = render_get_colour_data();
-    const auto is_near = m_thin_near || m_thin_dragging;
-
-    if (is_near)
-        blend_colour(dc, geometry->strip, colours.m_text, thin_alpha_track, false);
-
-    const auto alpha = m_thin_dragging || m_thin_thumb_hot ? thin_alpha_hot
-        : is_near                                          ? thin_alpha_near
-                                                           : thin_alpha_rest;
-    blend_colour(dc, geometry->thumb, colours.m_text, alpha, true);
+    m_thin_overlay_shown = false;
+    m_thin_tracking_leave = false;
 }
 
-void ListView::invalidate_thin_scrollbar() const
+// 依目前的捲動範圍、位置與滑鼠狀態更新浮層：沒有可捲的內容就藏起來；內容沒變就什麼都不做
+void ListView::update_thin_overlay()
 {
     const auto wnd = get_wnd();
 
     if (!wnd || !m_initialised)
         return;
 
-    const auto items_rect = get_items_rect();
-    const RECT strip{items_rect.right - scale_dpi_value(thin_strip_width), items_rect.top, items_rect.right,
-        items_rect.bottom};
-    InvalidateRect(wnd, &strip, FALSE);
+    const auto geometry = m_thin_scrollbar_active ? get_thin_scrollbar_geometry() : std::nullopt;
+
+    if (!geometry) {
+        if (m_thin_overlay && m_thin_overlay_shown)
+            ShowWindow(m_thin_overlay, SW_HIDE);
+
+        m_thin_overlay_shown = false;
+        return;
+    }
+
+    static const ThinOverlayWindowClass window_class(&ListView::s_thin_overlay_proc);
+
+    if (!window_class.is_registered())
+        return;
+
+    const auto colour = render_get_colour_data().m_text;
+    const BYTE alpha = m_thin_dragging || m_thin_thumb_hot ? thin_alpha_hot
+        : m_thin_near                                      ? thin_alpha_near
+                                                           : thin_alpha_rest;
+
+    ThinOverlayState state{geometry->strip, geometry->thumb, colour, alpha};
+
+    if (m_thin_overlay && m_thin_overlay_shown && state == m_thin_overlay_state)
+        return;
+
+    if (!m_thin_overlay) {
+        m_thin_overlay = CreateWindowEx(WS_EX_LAYERED, thin_overlay_class_name, L"", WS_CHILD, 0, 0, 0, 0, wnd, nullptr,
+            get_this_module(), nullptr);
+
+        if (!m_thin_overlay)
+            return;
+
+        SetWindowLongPtr(m_thin_overlay, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+        m_thin_overlay_shown = false;
+    }
+
+    const auto width = static_cast<int>(wil::rect_width(state.strip));
+    const auto height = static_cast<int>(wil::rect_height(state.strip));
+
+    if (width <= 0 || height <= 0)
+        return;
+
+    // 位置或大小變了（或第一次顯示）才動視窗；放最上層，免得被後來建立的兄弟視窗（例如表頭）蓋住
+    if (!m_thin_overlay_shown || !EqualRect(&state.strip, &m_thin_overlay_state.strip)) {
+        SetWindowPos(m_thin_overlay, HWND_TOP, state.strip.left, state.strip.top, width, height,
+            SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    }
+
+    // 畫成預乘 ARGB：整條軌道先填 alpha＝1（看不見但吃滑鼠），再把滑塊畫上去
+    BITMAPINFO info{};
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = width;
+    info.bmiHeader.biHeight = -height;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+
+    void* bits{};
+    wil::unique_hbitmap bitmap{CreateDIBSection(nullptr, &info, DIB_RGB_COLORS, &bits, nullptr, 0)};
+
+    if (!bitmap || !bits)
+        return;
+
+    auto* pixels = static_cast<uint32_t*>(bits);
+    std::fill_n(pixels, static_cast<size_t>(width) * height, 0x01000000u);
+
+    const RECT thumb_in_overlay{state.thumb.left - state.strip.left, state.thumb.top - state.strip.top,
+        state.thumb.right - state.strip.left, state.thumb.bottom - state.strip.top};
+    draw_pill(pixels, width, thumb_in_overlay, state.colour, state.alpha);
+
+    const auto screen_dc = wil::GetDC(nullptr);
+    wil::unique_hdc memory_dc{CreateCompatibleDC(screen_dc.get())};
+
+    if (!memory_dc)
+        return;
+
+    const auto _ = wil::SelectObject(memory_dc.get(), bitmap.get());
+
+    SIZE size{width, height};
+    POINT source{0, 0};
+    BLENDFUNCTION blend{};
+    blend.BlendOp = AC_SRC_OVER;
+    blend.SourceConstantAlpha = 255;
+    blend.AlphaFormat = AC_SRC_ALPHA;
+
+    if (UpdateLayeredWindow(m_thin_overlay, screen_dc.get(), nullptr, &size, memory_dc.get(), &source, 0, &blend, ULW_ALPHA)) {
+        m_thin_overlay_state = state;
+        m_thin_overlay_shown = true;
+    }
 }
 
 void ListView::update_thin_scrollbar_hover(POINT pt)
 {
     const auto geometry = get_thin_scrollbar_geometry();
-    const auto in_strip = geometry && PtInRect(&geometry->strip, pt);
+
+    if (!geometry)
+        return;
 
     // 滑塊的「熱區」用靠近時的寬度算，y 在滑塊範圍內就算（不用精準點到 4 px 細條）
-    const auto on_thumb = in_strip && pt.y >= geometry->thumb.top && pt.y < geometry->thumb.bottom
+    const bool on_thumb = pt.y >= geometry->thumb.top && pt.y < geometry->thumb.bottom
         && pt.x >= geometry->strip.right - scale_dpi_value(thin_thumb_right_inset + thin_thumb_near_width);
 
-    if (in_strip && !m_thin_tracking_leave) {
-        TRACKMOUSEEVENT track_mouse_event{sizeof(TRACKMOUSEEVENT), TME_LEAVE, get_wnd(), 0};
+    if (!m_thin_tracking_leave && m_thin_overlay) {
+        TRACKMOUSEEVENT track_mouse_event{sizeof(TRACKMOUSEEVENT), TME_LEAVE, m_thin_overlay, 0};
         m_thin_tracking_leave = TrackMouseEvent(&track_mouse_event) != 0;
     }
 
-    if (in_strip == m_thin_near && on_thumb == m_thin_thumb_hot)
+    if (m_thin_near && on_thumb == m_thin_thumb_hot)
         return;
 
-    m_thin_near = in_strip;
+    m_thin_near = true;
     m_thin_thumb_hot = on_thumb;
-
-    if (in_strip)
-        hide_tooltip();
-
-    invalidate_thin_scrollbar();
+    update_thin_overlay();
 }
 
 void ListView::drag_thin_scrollbar_to(int mouse_y)
@@ -738,7 +831,7 @@ void ListView::drag_thin_scrollbar_to(int mouse_y)
 
     // 跟原生滑塊拖曳一樣走 50 ms 的平滑捲動
     absolute_scroll(position, ScrollAxis::Vertical, false, 50.ms);
-    invalidate_thin_scrollbar();
+    update_thin_overlay();
 }
 
 void ListView::end_thin_scrollbar_drag(bool release_capture)
@@ -748,41 +841,51 @@ void ListView::end_thin_scrollbar_drag(bool release_capture)
 
     m_thin_dragging = false;
 
-    const auto wnd = get_wnd();
-
-    if (release_capture && wnd && GetCapture() == wnd)
+    if (release_capture && m_thin_overlay && GetCapture() == m_thin_overlay)
         ReleaseCapture();
-
-    if (!wnd)
-        return;
 
     // 放開後依游標目前的位置決定要不要維持「靠近」的樣子
     POINT pt{};
     GetCursorPos(&pt);
-    ScreenToClient(wnd, &pt);
+
+    RECT overlay_rect{};
+    const auto over_overlay = m_thin_overlay && m_thin_overlay_shown && GetWindowRect(m_thin_overlay, &overlay_rect)
+        && PtInRect(&overlay_rect, pt);
 
     m_thin_near = false;
     m_thin_thumb_hot = false;
-    update_thin_scrollbar_hover(pt);
-    invalidate_thin_scrollbar();
+
+    if (over_overlay && get_wnd()) {
+        ScreenToClient(get_wnd(), &pt);
+        update_thin_scrollbar_hover(pt);
+    }
+
+    update_thin_overlay();
 }
 
-std::optional<LRESULT> ListView::on_thin_scrollbar_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
+LRESULT ListView::on_thin_overlay_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
 {
+    // 浮層的座標換成清單視窗的座標
+    const auto to_list_view = [this](LPARAM l) {
+        return POINT{GET_X_LPARAM(l) + m_thin_overlay_state.strip.left, GET_Y_LPARAM(l) + m_thin_overlay_state.strip.top};
+    };
+
     switch (msg) {
+    case WM_SETCURSOR: {
+        static const auto cursor = LoadCursor(nullptr, IDC_ARROW);
+        SetCursor(cursor);
+        return TRUE;
+    }
     case WM_MOUSEMOVE: {
-        const POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        const auto pt = to_list_view(lp);
 
         if (m_thin_dragging) {
             drag_thin_scrollbar_to(pt.y);
             return 0;
         }
 
-        // 框選、拖放進行中就不理會滑軌的懸停
-        if (!m_selecting && (wp & (MK_LBUTTON | MK_RBUTTON)) == 0)
-            update_thin_scrollbar_hover(pt);
-
-        return std::nullopt;
+        update_thin_scrollbar_hover(pt);
+        return 0;
     }
     case WM_MOUSELEAVE:
         m_thin_tracking_leave = false;
@@ -790,17 +893,17 @@ std::optional<LRESULT> ListView::on_thin_scrollbar_message(HWND wnd, UINT msg, W
         if (!m_thin_dragging && (m_thin_near || m_thin_thumb_hot)) {
             m_thin_near = false;
             m_thin_thumb_hot = false;
-            invalidate_thin_scrollbar();
+            update_thin_overlay();
         }
 
-        return std::nullopt;
+        return 0;
     case WM_LBUTTONDOWN:
     case WM_LBUTTONDBLCLK: {
-        const POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        const auto pt = to_list_view(lp);
         const auto geometry = get_thin_scrollbar_geometry();
 
-        if (!geometry || !PtInRect(&geometry->strip, pt))
-            return std::nullopt;
+        if (!geometry)
+            return 0;
 
         // 右邊緣這條是滑軌：不選取底下的項目、不開始框選，也不搶焦點（跟原生滑軌一樣）
         exit_inline_edit();
@@ -811,27 +914,22 @@ std::optional<LRESULT> ListView::on_thin_scrollbar_message(HWND wnd, UINT msg, W
             m_thin_dragging = true;
             m_thin_drag_grab = pt.y - geometry->thumb.top;
             SetCapture(wnd);
-            invalidate_thin_scrollbar();
         } else {
             scroll_from_scroll_bar(pt.y < geometry->thumb.top ? SB_PAGEUP : SB_PAGEDOWN);
-            invalidate_thin_scrollbar();
         }
 
+        update_thin_overlay();
         return 0;
     }
     case WM_LBUTTONUP:
-        if (m_thin_dragging) {
-            end_thin_scrollbar_drag(true);
-            return 0;
-        }
-
-        return std::nullopt;
+        end_thin_scrollbar_drag(true);
+        return 0;
     case WM_CAPTURECHANGED:
     case WM_CANCELMODE:
         end_thin_scrollbar_drag(false);
-        return std::nullopt;
+        return 0;
     default:
-        return std::nullopt;
+        return DefWindowProc(wnd, msg, wp, lp);
     }
 }
 
