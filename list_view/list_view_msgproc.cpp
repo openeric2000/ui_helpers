@@ -181,6 +181,8 @@ LRESULT ListView::on_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         const auto dc = wil::BeginPaint(wnd, &ps);
         BufferedPaint buffered_dc(dc.get(), ps.rcPaint);
         render_items(buffered_dc.get(), ps.rcPaint);
+        // 框選方框疊在清單內容上面（自編版新增）
+        render_marquee(buffered_dc.get());
 
         return 0;
     }
@@ -265,6 +267,9 @@ LRESULT ListView::on_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
                         set_focus_item(hit_result.index);
                     m_selecting = true; //! m_single_selection;
                 }
+                // 框選方框（自編版新增）：從沒選取的列開始拖才框選；已選取的列維持拖放
+                if (!m_selecting_move && can_start_marquee())
+                    begin_marquee(pt, m_lbutton_down_ctrl);
             }
             SetCapture(wnd);
         } else if (hit_result.category == HitTestCategory::OnGroupHeader) {
@@ -284,7 +289,15 @@ LRESULT ListView::on_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
                 }
             }
         } else if (hit_result.category != HitTestCategory::BelowViewport) {
-            if (m_selection_mode != SelectionMode::SingleStrict) {
+            if (can_start_marquee()) {
+                // 框選方框（自編版新增）：空白處按下開始框選；按著 Ctrl 時保留原本的選取（檔案總管的做法）
+                if (!m_lbutton_down_ctrl) {
+                    set_selection_state(pfc::bit_array_true(), pfc::bit_array_false());
+                    m_shift_start.reset();
+                }
+                begin_marquee(pt, m_lbutton_down_ctrl);
+                SetCapture(wnd);
+            } else if (m_selection_mode != SelectionMode::SingleStrict) {
                 set_selection_state(pfc::bit_array_true(), pfc::bit_array_false());
                 m_shift_start.reset();
             }
@@ -292,6 +305,10 @@ LRESULT ListView::on_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
     }
         return 0;
     case WM_LBUTTONUP: {
+        // 框選方框（自編版新增）：真的拉出方框的話，放開時不再做 Ctrl＋點一下的單列切換
+        const bool marquee_was_shown = m_marquee_shown;
+        end_marquee();
+
         if (m_selecting_move && !m_selecting_moved && !m_lbutton_down_ctrl) {
             if (m_selecting_start < m_items.size()) {
                 if (!m_inline_edit_prevent && get_item_selected(m_selecting_start)) {
@@ -319,7 +336,7 @@ LRESULT ListView::on_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             destroy_timer_scroll_up();
         } else if (m_lbutton_down_ctrl) {
             const HitTestResult& hit_result = m_lbutton_down_hittest;
-            if (wp & MK_CONTROL) {
+            if ((wp & MK_CONTROL) && !marquee_was_shown) {
                 if (hit_result.category == HitTestCategory::OnUnobscuredItem
                     || hit_result.category == HitTestCategory::OnItemObscuredBelow
                     || hit_result.category == HitTestCategory::OnItemObscuredAbove) {
@@ -353,6 +370,13 @@ LRESULT ListView::on_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             ReleaseCapture();
     }
         return 0;
+    case WM_CAPTURECHANGED:
+        // 框選中滑鼠被別的視窗搶走（例如跳出對話框）：收掉方框，別讓之後沒按鍵的移動繼續改選取
+        if (m_marquee_tracking && reinterpret_cast<HWND>(lp) != wnd) {
+            end_marquee();
+            m_selecting = false;
+        }
+        break;
     case WM_RBUTTONUP: {
         m_inline_edit_prevent = false;
         m_dragging_rmb = false;
@@ -401,6 +425,11 @@ LRESULT ListView::on_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
     }
     case WM_MOUSEMOVE: {
         POINT pt = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        // 框選方框（自編版新增）：框選中由方框決定選取，取代原本的拖曳選取
+        if (m_marquee_tracking) {
+            update_marquee(pt);
+            return 0;
+        }
         if (!m_selecting) {
             handle_mousemove_for_tooltip(pt);
         }
@@ -710,9 +739,14 @@ LRESULT ListView::on_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
         case TIMER_SCROLL_UP:
             scroll_from_scroll_bar(SB_LINEUP);
+            // 框選中自動捲動：游標沒動也要把新捲進來的列算進方框
+            if (m_marquee_tracking)
+                update_marquee_from_cursor();
             return 0;
         case TIMER_SCROLL_DOWN:
             scroll_from_scroll_bar(SB_LINEDOWN);
+            if (m_marquee_tracking)
+                update_marquee_from_cursor();
             return 0;
         case EDIT_TIMER_ID: {
             create_inline_edit(pfc::list_t<size_t>(m_inline_edit_indices), m_inline_edit_column);

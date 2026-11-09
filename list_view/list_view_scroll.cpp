@@ -217,6 +217,10 @@ void ListView::internal_scroll(int new_position, ScrollAxis axis)
         RedrawWindow(get_wnd(), &rect, nullptr, RDW_INVALIDATE);
     }
 
+    // 框選方框也畫在清單上：ScrollWindowEx 會把方框像素一起捲走（游標那一端應該留在原地），整個清單區重畫
+    if (m_marquee_shown)
+        RedrawWindow(get_wnd(), &clip_rect, nullptr, RDW_INVALIDATE);
+
     // 細滑軌是畫在清單上的：ScrollWindowEx 會把舊的滑軌像素一起捲走，要整條重畫
     if (axis == ScrollAxis::Vertical && m_thin_scrollbar_active)
         update_thin_overlay();

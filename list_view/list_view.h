@@ -380,6 +380,12 @@ public:
     static void s_set_thin_scrollbar_enabled(bool enabled);
     [[nodiscard]] static bool s_is_thin_scrollbar_enabled() { return s_thin_scrollbar_enabled; }
 
+    // 自編版新增（2026-11-09）：按住左鍵拖曳時畫出 Windows 原生樣式的框選方框（實作在 list_view_marquee.cpp）。
+    // 只有呼叫過 set_marquee_selection_allowed(true) 的多選清單才會用（目前只有播放清單）；
+    // 全域開關由 Columns UI 設定頁呼叫 s_set_marquee_selection_enabled，下一次按下滑鼠就生效
+    void set_marquee_selection_allowed(bool allowed) { m_marquee_allowed = allowed; }
+    static void s_set_marquee_selection_enabled(bool enabled) { s_marquee_enabled = enabled; }
+
     ItemVisibility get_item_visibility(size_t index, bool use_target_position = true) const;
     bool is_partially_visible(size_t index);
     bool is_fully_visible(size_t index);
@@ -1169,6 +1175,34 @@ private:
     void update_thin_scrollbar_hover(POINT pt);
     void drag_thin_scrollbar_to(int mouse_y);
     void end_thin_scrollbar_drag(bool release_capture);
+
+    // ---- 框選方框（2026-11-09，實作在 list_view_marquee.cpp）----
+    inline static bool s_marquee_enabled{true};
+    bool m_marquee_allowed{};
+    // 按下左鍵後在追蹤中（還沒超過拖曳門檻時方框不顯示、選取不變）
+    bool m_marquee_tracking{};
+    // 已超過拖曳門檻、方框畫在畫面上
+    bool m_marquee_shown{};
+    // 按著 Ctrl 開始：方框掃到的列選取狀態反過來（以按下前的選取為底），跟檔案總管一樣
+    bool m_marquee_toggle{};
+    std::vector<bool> m_marquee_base_selection;
+    // 起點存「清單內容座標」（含捲動位置），清單捲動時方框起點跟著內容走
+    POINT m_marquee_anchor{};
+    POINT m_marquee_initial_client{};
+    POINT m_marquee_current_client{};
+    // 上一次方框掃到的列（first > last 代表沒有），沒變就不重設選取
+    size_t m_marquee_first{1};
+    size_t m_marquee_last{0};
+
+    [[nodiscard]] bool can_start_marquee() const;
+    void begin_marquee(POINT pt_client, bool toggle);
+    void update_marquee(POINT pt_client);
+    void update_marquee_from_cursor();
+    void end_marquee();
+    [[nodiscard]] RECT get_marquee_client_rect() const;
+    void invalidate_marquee();
+    void render_marquee(HDC dc) const;
+
     bool m_use_smooth_scroll{};
     bool m_is_smooth_scrolling_suspended{};
     std::optional<SmoothScrollHelper> m_smooth_scroll_helper;

@@ -148,6 +148,9 @@
     <ClCompile Include="list_view\list_view_misc.cpp">
       <Filter>List View</Filter>
     </ClCompile>
+    <ClCompile Include="list_view\list_view_marquee.cpp">
+      <Filter>List View</Filter>
+    </ClCompile>
     <ClCompile Include="list_view\list_view_msgproc.cpp">
       <Filter>List View</Filter>
     </ClCompile>
