@@ -82,6 +82,13 @@ void ListView::update_column_sizes()
     else
         display_width = 0;
 
+    // 自編版（2026-11-14）：自動欄寬時右邊留一段空白，最後一欄的字和選取底色不要貼著邊緣
+    // （固定欄寬時欄位總寬本來就比清單窄，右邊自然有空白；自動欄寬會剛好撐滿）
+    if (m_autosize) {
+        const int right_margin = uih::scale_dpi_value(24);
+        display_width = display_width > right_margin ? display_width - right_margin : 0;
+    }
+
     size_t count = m_columns.size();
 
     for (auto&& column : m_columns)
