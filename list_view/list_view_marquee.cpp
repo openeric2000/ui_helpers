@@ -22,6 +22,14 @@ constexpr BYTE marquee_fill_alpha = 85;
 
 } // namespace
 
+void ListView::set_marquee_tracking(bool tracking)
+{
+    if (m_marquee_tracking == tracking)
+        return;
+    m_marquee_tracking = tracking;
+    s_marquee_tracking_count.fetch_add(tracking ? 1 : -1, std::memory_order_relaxed);
+}
+
 bool ListView::can_start_marquee() const
 {
     return s_marquee_enabled && m_marquee_allowed && m_selection_mode == SelectionMode::Multiple;
@@ -31,7 +39,7 @@ void ListView::begin_marquee(POINT pt_client, bool toggle)
 {
     const auto items_rect = get_items_rect();
 
-    m_marquee_tracking = true;
+    set_marquee_tracking(true);
     m_marquee_shown = false;
     m_marquee_toggle = toggle;
     m_marquee_initial_client = pt_client;
@@ -167,7 +175,7 @@ void ListView::end_marquee()
 
     invalidate_marquee();
 
-    m_marquee_tracking = false;
+    set_marquee_tracking(false);
     m_marquee_shown = false;
     m_marquee_toggle = false;
     m_marquee_base_selection.clear();

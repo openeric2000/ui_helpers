@@ -108,6 +108,9 @@ LRESULT ListView::on_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
     }
     case WM_DESTROY:
         std::erase(s_list_views, this);
+        // 框選中被關掉（例如換版面）：全域的框選計數要扣回來
+        set_marquee_tracking(false);
+        m_marquee_shown = false;
         // 細滑軌浮層是子視窗，會隨清單一起被銷毀；先放掉記著的視窗代號，免得之後有人拿失效的代號用
         m_thin_overlay = nullptr;
         m_thin_overlay_shown = false;

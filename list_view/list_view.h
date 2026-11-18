@@ -385,6 +385,10 @@ public:
     // 全域開關由 Columns UI 設定頁呼叫 s_set_marquee_selection_enabled，下一次按下滑鼠就生效
     void set_marquee_selection_allowed(bool allowed) { m_marquee_allowed = allowed; }
     static void s_set_marquee_selection_enabled(bool enabled) { s_marquee_enabled = enabled; }
+    // 自編版新增（2026-11-18）：現在有沒有任何一個清單在框選追蹤中（在可以框選的地方按下左鍵、還沒放開）。
+    // 從按下就算、不等方框出現：按下那一列會先被選取，等方框出現才算的話，拖曳一開始標頭就會去抓那一列的封面（219 實測）。
+    // Columns UI 用它做 %cui_list_marquee%，標頭在這段期間先不換封面、放開才換；可以在任何執行緒讀
+    [[nodiscard]] static bool s_is_marquee_active() { return s_marquee_tracking_count.load(std::memory_order_relaxed) > 0; }
 
     ItemVisibility get_item_visibility(size_t index, bool use_target_position = true) const;
     bool is_partially_visible(size_t index);
@@ -1179,8 +1183,10 @@ private:
     // ---- 框選方框（2026-11-09，實作在 list_view_marquee.cpp）----
     inline static bool s_marquee_enabled{true};
     bool m_marquee_allowed{};
-    // 按下左鍵後在追蹤中（還沒超過拖曳門檻時方框不顯示、選取不變）
+    // 按下左鍵後在追蹤中（還沒超過拖曳門檻時方框不顯示、選取不變）。改它一律經過 set_marquee_tracking，全域計數才對得上
     bool m_marquee_tracking{};
+    inline static std::atomic<int> s_marquee_tracking_count{};
+    void set_marquee_tracking(bool tracking);
     // 已超過拖曳門檻、方框畫在畫面上
     bool m_marquee_shown{};
     // 按著 Ctrl 開始：方框掃到的列選取狀態反過來（以按下前的選取為底），跟檔案總管一樣
